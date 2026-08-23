@@ -1,0 +1,7 @@
+config.py
+tasks.db
+db/seed_local.py
+__pycache__/
+*.pyc
+.venv/
+venv/
