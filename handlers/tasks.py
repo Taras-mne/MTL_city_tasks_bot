@@ -7,7 +7,10 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import repo
-from screens import esc, finish, kb, prompt, reprompt, show
+from screens import (
+    build_target, esc, finish, hide_images, kb, prompt, prompt_msg,
+    reprompt, send_album, show, try_delete,
+)
 
 from .states import St
 
@@ -205,6 +208,76 @@ async def cb_clear_deadline(cb: CallbackQuery, session: AsyncSession, state: FSM
         task.deadline = None
     await state.set_state(None)
     await show(cb, session, state, f"tc:{task_id}", "Убрал дедлайн 🧹")
+
+
+# --- фото задачи ---
+
+@router.callback_query(F.data.startswith("tim:"))
+async def cb_images(cb: CallbackQuery, session: AsyncSession, state: FSMContext):
+    await show(cb, session, state, cb.data)
+
+
+@router.callback_query(F.data.startswith("tia:"))
+async def cb_image_add(cb: CallbackQuery, state: FSMContext):
+    task_id = int(cb.data.split(":")[1])
+    await state.update_data(t_id=task_id, img_added=0)
+    await prompt(cb, state, St.task_image_add, "📎 Пришли фото (можно альбомом).", f"tim:{task_id}")
+
+
+@router.message(St.task_image_add, F.photo)
+async def msg_image_add(message: Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    task_id = data["t_id"]
+    photo = message.photo[-1]
+    result = await repo.add_image(session, task_id, photo.file_id, photo.file_unique_id)
+    if result == "limit":
+        return await finish(message, state, session, f"tc:{task_id}")
+    added = data.get("img_added", 0) + (1 if result == "ok" else 0)
+    await state.update_data(img_added=added)
+    await try_delete(message)
+    note = "Такое фото уже есть — пропустил." if result == "dup" else f"Добавлено: {added}."
+    await prompt_msg(
+        message.bot, message.chat.id, state, St.task_image_add,
+        f"📎 {note} Шли ещё или жми «Готово».",
+        [[("✅ Готово", f"tif:{task_id}")]],
+    )
+
+
+@router.message(St.task_image_add)
+async def msg_image_add_other(message: Message, state: FSMContext):
+    await reprompt(message, state, "Жду именно фото.")
+
+
+@router.callback_query(F.data.startswith("tif:"))
+async def cb_image_done(cb: CallbackQuery, session: AsyncSession, state: FSMContext):
+    task_id = int(cb.data.split(":")[1])
+    await state.set_state(None)
+    await show(cb, session, state, f"tc:{task_id}")
+
+
+@router.callback_query(F.data.startswith("tiv:"))
+async def cb_image_view(cb: CallbackQuery, session: AsyncSession, state: FSMContext):
+    task_id = int(cb.data.split(":")[1])
+    images = await repo.task_images(session, task_id)
+    if not images:
+        return await show(cb, session, state, f"tim:{task_id}", "Фото уже нет")
+    await hide_images(cb.bot, cb.message.chat.id, state)
+    mids = await send_album(cb.bot, cb.message.chat.id, images)
+    if not mids:
+        return await cb.answer("Не смог отправить фото 😕", show_alert=True)
+    await state.update_data(img_mids=mids)
+    data = await state.get_data()
+    text, markup = await build_target(session, data, f"tim:{task_id}")
+    await try_delete(cb.message)
+    await cb.message.answer(text, reply_markup=markup)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("tidel:"))
+async def cb_image_delete(cb: CallbackQuery, session: AsyncSession, state: FSMContext):
+    _, task_id, image_id = cb.data.split(":")
+    await repo.delete_image(session, int(image_id))
+    await show(cb, session, state, f"tim:{task_id}", "Удалил 🗑")
 
 
 # --- теги задачи ---

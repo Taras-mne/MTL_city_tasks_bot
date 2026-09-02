@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from datetime import datetime
 
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 
 from db import repo
 
@@ -97,6 +97,34 @@ async def try_delete(message):
         await message.delete()
     except Exception:
         pass
+
+
+async def send_album(bot, chat_id, images) -> list[int]:
+    """Шлёт фото задачи (одно или альбомом), возвращает id сообщений."""
+    try:
+        if len(images) == 1:
+            sent = [await bot.send_photo(chat_id, images[0].file_id)]
+        else:
+            media = [InputMediaPhoto(media=img.file_id) for img in images]
+            sent = await bot.send_media_group(chat_id, media)
+    except Exception:
+        return []
+    return [m.message_id for m in sent]
+
+
+async def hide_images(bot, chat_id, state):
+    """Убирает сообщения с фото задачи. Зовётся при любой навигации,
+    чтобы фото не висели под чужим экраном."""
+    data = await state.get_data()
+    mids = data.get("img_mids")
+    if not mids:
+        return
+    await state.update_data(img_mids=None)
+    for mid in mids:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
 
 
 # --- экраны ---
@@ -191,6 +219,7 @@ async def screen_task_card(session, task_id):
         return None
     links = await repo.task_links(session, task_id)
     assignees = await repo.task_assignees(session, task_id)
+    images = await repo.task_images(session, task_id)
     lines = [f"📋 <b>{esc(task.name)}</b>" + (" ✅" if task.is_done else "")]
     if task.description:
         lines.append(f"<i>{esc(task.description)}</i>")
@@ -213,7 +242,7 @@ async def screen_task_card(session, task_id):
             lines.append(item)
     rows = [
         [("✏️ Название", f"ten:{task_id}"), ("📝 Описание", f"ted:{task_id}")],
-        [("⏰ Дедлайн", f"tdl:{task_id}")],
+        [("⏰ Дедлайн", f"tdl:{task_id}"), (f"🖼 Фото ({len(images)})", f"tim:{task_id}")],
         [(f"🏷 Теги ({len(links)})", f"tt:{task_id}"),
          (f"👤 Отв. ({len(assignees)})", f"ta:{task_id}")],
         [("➖ Из моего фида" if in_feed else "📌 В мой фид", f"tf:{task_id}")],
@@ -280,6 +309,32 @@ async def screen_attach(session, task_id, page):
         rows.append(nav)
     rows.append([("🆕 Создать тег", f"ntg:{task_id}")])
     rows.append([("⬅️ Назад", f"tt:{task_id}")])
+    return text, kb(rows)
+
+
+async def screen_task_images(session, task_id):
+    task = await repo.get_task(session, task_id)
+    if not task:
+        return None
+    images = await repo.task_images(session, task_id)
+    text = f"🖼 Фото задачи «{esc(task.name)}» — {len(images)}\n\n"
+    if images:
+        text += "Фото видны в карточке задачи. Тут — показать ещё раз или удалить лишние."
+    else:
+        text += "Пока ни одного фото."
+    rows = []
+    if images:
+        rows.append([("👁 Показать все", f"tiv:{task_id}")])
+        rows.extend(grid(
+            list(enumerate(images, 1)),
+            lambda p: f"🗑 Фото {p[0]}",
+            lambda p: f"tidel:{task_id}:{p[1].id}",
+        ))
+    if len(images) < repo.IMAGES_LIMIT:
+        rows.append([("➕ Добавить", f"tia:{task_id}")])
+    else:
+        text += f"\n\nЛимит — {repo.IMAGES_LIMIT} фото. Чтобы добавить, удали что-то."
+    rows.append([("⬅️ Назад", f"tc:{task_id}")])
     return text, kb(rows)
 
 
@@ -432,6 +487,8 @@ async def build_target(session, data, target):
         return await screen_link(session, int(p[1]), int(p[2])) or await build_target(session, data, f"tt:{p[1]}")
     if p[0] == "at":
         return await screen_attach(session, int(p[1]), data.get("ap", 0)) or await build_target(session, data, "tl")
+    if p[0] == "tim":
+        return await screen_task_images(session, int(p[1])) or await build_target(session, data, "tl")
     if p[0] == "ta":
         return await screen_task_assignees(session, int(p[1])) or await build_target(session, data, "tl")
     if p[0] == "taa":
@@ -451,10 +508,32 @@ async def build_target(session, data, target):
 
 # --- помощники обработчиков ---
 
-async def show(cb, session, state, target, toast=None):
-    data = await state.get_data()
+async def render_screen(bot, chat_id, message_id, state, session, data, target):
+    """Рисует экран-цель. Карточка задачи с фото — особый случай: старый экран
+    удаляется, под ним встают фото, а карточка пересоздаётся ниже, чтобы
+    кнопки оставались внизу чата."""
     text, markup = await build_target(session, data, target)
-    await safe_edit(cb.bot, cb.message.chat.id, cb.message.message_id, text, markup)
+    p = (target or "").split(":")
+    images = []
+    # get_task: при софт-удалённой задаче build_target уже откатился на список
+    if p[0] == "tc" and await repo.get_task(session, int(p[1])):
+        images = await repo.task_images(session, int(p[1]))
+    if images:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            pass
+        mids = await send_album(bot, chat_id, images)
+        await state.update_data(img_mids=mids)
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+    else:
+        await safe_edit(bot, chat_id, message_id, text, markup)
+
+
+async def show(cb, session, state, target, toast=None):
+    await hide_images(cb.bot, cb.message.chat.id, state)
+    data = await state.get_data()
+    await render_screen(cb.bot, cb.message.chat.id, cb.message.message_id, state, session, data, target)
     await cb.answer(toast)
 
 
@@ -492,11 +571,15 @@ async def reprompt(message, state, warn):
 
 async def finish(message, state, session, target=None):
     """Завершает текстовый ввод: чистит состояние и возвращает экран."""
+    await hide_images(message.bot, message.chat.id, state)
     data = await state.get_data()
     await state.set_state(None)
     await try_delete(message)
-    text, markup = await build_target(session, data, target or data.get("ret", "menu"))
     if data.get("smid"):
-        await safe_edit(message.bot, message.chat.id, data["smid"], text, markup)
+        await render_screen(
+            message.bot, message.chat.id, data["smid"],
+            state, session, data, target or data.get("ret", "menu"),
+        )
     else:
+        text, markup = await build_target(session, data, target or data.get("ret", "menu"))
         await message.answer(text, reply_markup=markup)

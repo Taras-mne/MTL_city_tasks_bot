@@ -3,11 +3,13 @@ from math import ceil
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import AccessRequest, AllowedUser, Tag, Task, TaskAssignee, TaskTag, utcnow
+from .models import AccessRequest, AllowedUser, Tag, Task, TaskAssignee, TaskImage, TaskTag, utcnow
 
 PAGE = 9
 
 LINK_DESC_LIMIT = 100
+
+IMAGES_LIMIT = 10  # столько же влезает в один media group
 
 
 def _pages(total: int) -> int:
@@ -73,6 +75,52 @@ async def emoji_map(s: AsyncSession, task_ids: list[int]) -> dict[int, str]:
     for task_id, emoji in rows:
         result[task_id] = result.get(task_id, "") + emoji
     return result
+
+
+# --- фото задач ---
+
+async def task_images(s: AsyncSession, task_id: int) -> list[TaskImage]:
+    return list(await s.scalars(
+        select(TaskImage)
+        .where(TaskImage.task_id == task_id, TaskImage.deleted_at.is_(None))
+        .order_by(TaskImage.created_at, TaskImage.id)
+    ))
+
+
+async def get_image(s: AsyncSession, image_id: int) -> TaskImage | None:
+    return await s.scalar(
+        select(TaskImage).where(TaskImage.id == image_id, TaskImage.deleted_at.is_(None))
+    )
+
+
+async def add_image(s: AsyncSession, task_id: int, file_id: str, file_unique_id: str) -> str:
+    """Возвращает "ok" / "dup" / "limit"."""
+    existing = await s.scalar(
+        select(TaskImage).where(
+            TaskImage.task_id == task_id, TaskImage.file_unique_id == file_unique_id
+        )
+    )
+    if existing and existing.deleted_at is None:
+        return "dup"
+    count = await s.scalar(
+        select(func.count())
+        .select_from(TaskImage)
+        .where(TaskImage.task_id == task_id, TaskImage.deleted_at.is_(None))
+    ) or 0
+    if count >= IMAGES_LIMIT:
+        return "limit"
+    if existing:
+        existing.deleted_at = None
+        existing.file_id = file_id
+    else:
+        s.add(TaskImage(task_id=task_id, file_id=file_id, file_unique_id=file_unique_id))
+    return "ok"
+
+
+async def delete_image(s: AsyncSession, image_id: int):
+    img = await get_image(s, image_id)
+    if img:
+        img.deleted_at = utcnow()
 
 
 # --- связки задача-тег ---

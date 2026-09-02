@@ -6,6 +6,7 @@ class St(StatesGroup):
     task_name = State()
     task_desc = State()
     task_deadline = State()
+    task_image_add = State()
     link_desc = State()
     tag_name = State()
     tag_emoji = State()

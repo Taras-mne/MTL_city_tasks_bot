@@ -24,6 +24,18 @@ class Task(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
+class TaskImage(Base):
+    __tablename__ = "task_images"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    # telegram file_id стабилен для нашего бота — храним его, файл не скачиваем
+    file_id: Mapped[str] = mapped_column(String(200))
+    file_unique_id: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
 class Tag(Base):
     __tablename__ = "tags"
 
