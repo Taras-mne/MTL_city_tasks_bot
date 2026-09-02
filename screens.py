@@ -152,15 +152,30 @@ async def screen_task_list(session, page, show_done):
     tasks, total, page, pages = await repo.list_tasks(session, page, show_done)
     emojis = await repo.emoji_map(session, [t.id for t in tasks])
     title = "✅ <b>Выполненные</b>" if show_done else "📋 <b>Задачи</b>"
-    text = f"{title} — {total}" + ("" if tasks else "\n\nПока пусто.")
+    lines = [f"{title} — {total}", "─" * 18]
+    if not tasks:
+        lines.append("Пока пусто.")
     now = datetime.now()
-    rows = []
-    for t in tasks:
+    rows, num_row = [], []
+    for i, t in enumerate(tasks, 1):
         marker = ""
         if t.deadline:
             marker = "🔥" if not show_done and t.deadline < now else "⏰"
-        label = (marker + emojis.get(t.id, "") + " " + t.name).strip()
-        rows.append([(trunc(label), f"tc:{t.id}")])
+        prefix = (marker + emojis.get(t.id, "")).strip()
+        line = f"{i}) " + (f"{prefix} " if prefix else "") + f"<b>{esc(t.name)}</b>"
+        if t.deadline:
+            line += f" — {fmt_deadline(t.deadline)}"
+            if not show_done:
+                line += f" ({deadline_note(t.deadline)})"
+        lines.append(line)
+        lines.append("")
+        num_row.append((str(i), f"tc:{t.id}"))
+        if len(num_row) == 3:
+            rows.append(num_row)
+            num_row = []
+    if num_row:
+        rows.append(num_row)
+    text = "\n".join(lines).rstrip()
     nav = nav_row("tlp", page, pages)
     if nav:
         rows.append(nav)
